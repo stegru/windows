@@ -14,7 +14,7 @@
         "edge": "6.5.1",
         "string-argv": "0.0.2",
         "@pokusew/pcsclite": "0.4.18",
-        "universal": "git://github.com/javihernandez/universal.git#demo-ATIA"
+        "universal": "git://github.com/javihernandez/universal.git#demo-ATIA+GPII-2521"
     },
     "devDependencies": {
         "grunt": "1.0.1",

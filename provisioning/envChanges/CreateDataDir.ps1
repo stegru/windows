@@ -15,5 +15,6 @@ Write-Verbose("Deleting: '$GPII_Data_Path'")
 Remove-Item "$GPII_Data_Path\*" -Force -Recurse
 Write-Verbose("Copying: '$dataDir' to '$GPII_Data_Path'")
 Copy-Item -Path $dataDir -Force -Recurse -Destination $GPII_Data_Path -ErrorAction Stop
+New-Item -Path $GPII_Data_Path -Name "ZoomText" -ItemType Directory -Force
 
 exit 0

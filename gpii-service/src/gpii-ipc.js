@@ -43,6 +43,8 @@ ipc.pipePrefix = "\\\\.\\pipe\\gpii-";
  * @property {String} processKey Identifies the child process.
  * @property {messaging.Session} messaging Messaging session.
  * @property {function} requestHandler Function to handle requests for this connection.
+ * @property {Boolean} inShutdown The other end is currently shutting down.
+ * @property {Number} sessionID The Windows session ID.
  */
 
 /**
@@ -60,6 +62,7 @@ ipc.ipcConnections = {};
  * @param {Boolean} options.admin true to keep pipe access to admin-only.
  * @param {Boolean} options.messaging true to use the messaging wrapper.
  * @param {Boolean} options.processKey Identifies the child process.
+ * @param {Number} options.sessionID The session ID in which to start the process.
  * @return {Promise} Resolves with a value containing the pipe server and pid.
  */
 ipc.startProcess = function (command, ipcName, options) {
@@ -79,6 +82,7 @@ ipc.startProcess = function (command, ipcName, options) {
         return Promise.reject("startProcess must be called with command and/or ipcName.");
     }
 
+    /** @type {IpcConnection} */
     var ipcConnection = null;
     if (ipcName) {
         ipcConnection = ipc.ipcConnections[ipcName];
@@ -90,6 +94,7 @@ ipc.startProcess = function (command, ipcName, options) {
         ipcConnection.admin = options.admin;
         ipcConnection.processKey = options.processKey;
         ipcConnection.messaging = options.messaging ? undefined : false;
+        ipcConnection.sessionID = options.sessionID;
     }
 
     // Create the pipe, and pass it to a new process.
@@ -329,13 +334,13 @@ ipc.validateClient = function (pipe, pid, timeout) {
  * user token could not be received. Should only be true if not running as a service.
  * @param {Object} options.env Additional environment key-value pairs.
  * @param {String} options.currentDir Current directory for the new process.
- *
+ * @param {Number} options.sessionID The session ID in which to start the process.
  * @return {Number} The pid of the new process.
  */
 ipc.execute = function (command, options) {
     options = Object.assign({}, options);
 
-    var userToken = windows.getDesktopUser();
+    var userToken = windows.getSessionUserToken(options.sessionID);
     if (!userToken) {
         // There is no token for this session - perhaps no one is logged on, or is in the lock-screen (screen saver).
         // Continuing could cause something to be executed as the LocalSystem account, which may be undesired.

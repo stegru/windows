@@ -28,7 +28,7 @@ module.exports = gpiiClient;
 
 gpiiClient.options = {
     // Number of seconds to wait for a response from the client before determining that the process is unresponsive.
-    clientTimeout: 120
+    clientTimeout: 180
 };
 
 /**
@@ -39,9 +39,16 @@ gpiiClient.options = {
 gpiiClient.requestHandlers = {};
 
 /**
+ * A request from the GPII client.
+ * @typedef GPIIRequest {Object}
+ * @property {IpcConnection} ipcConnection The IPC connection.
+ * @property {Mixed} [various] Zero or more additional fields specific to the request.
+ */
+
+/**
  * Executes something.
  *
- * @param {Object} request The request data.
+ * @param {GPIIRequest} request The request data.
  * @param {String} request.command The command to run.
  * @param {Array<String>} request.args Arguments to pass.
  * @param {Object} request.options The options argument for child_process.spawn.
@@ -106,12 +113,12 @@ gpiiClient.requestHandlers.execute = function (request) {
 /**
  * The user process is shutting down (eg, due to the user logging out of the system). The client sends this request
  * to prevent the service restarting it when it terminates.
- *
+ * @param {GPIIRequest} request The request data.
  */
-gpiiClient.requestHandlers.closing = function () {
-    service.logImportant("GPII Client is closing itself");
-    gpiiClient.inShutdown = true;
-    processHandling.dontRestartProcess(gpiiClient.ipcConnection.processKey);
+gpiiClient.requestHandlers.closing = function (request) {
+    service.logImportant("GPII Client is closing itself - session id:", request.ipcConnection.sessionID);
+    request.ipcConnection.inShutdown = true;
+    processHandling.dontRestartProcess(request.ipcConnection.sessionID, request.ipcConnection.processKey);
 };
 
 /**
@@ -168,10 +175,10 @@ gpiiClient.addRequestHandler = function (requestType, callback) {
 };
 
 /**
- * The IPC connection
- * @type {IpcConnection}
+ * The IPC connections, for each windows session.
+ * @type {Array<IpcConnection>}
  */
-gpiiClient.ipcConnection = null;
+gpiiClient.ipcConnection = {};
 
 /**
  * Called when the GPII user process has connected to the service.
@@ -179,13 +186,16 @@ gpiiClient.ipcConnection = null;
  * @param {IpcConnection} ipcConnection The IPC connection.
  */
 gpiiClient.connected = function (ipcConnection) {
-    gpiiClient.ipcConnection = ipcConnection;
-    gpiiClient.inShutdown = false;
-    ipcConnection.requestHandler = gpiiClient.requestHandler;
+    gpiiClient.ipcConnection[ipcConnection.sessionID] = ipcConnection;
 
-    service.log("Established IPC channel with the GPII user process");
+    ipcConnection.requestHandler = function (request) {
+        request.ipcConnection = ipcConnection;
+        return gpiiClient.requestHandler(request);
+    };
 
-    gpiiClient.monitorStatus(gpiiClient.options.clientTimeout);
+    service.log("Established IPC channel with the GPII user process on session ", ipcConnection.sessionID);
+
+    gpiiClient.monitorStatus(ipcConnection, gpiiClient.options.clientTimeout);
 };
 
 /**
@@ -195,9 +205,9 @@ gpiiClient.connected = function (ipcConnection) {
  */
 gpiiClient.closed = function (ipcConnection) {
     service.log("Lost IPC channel with the GPII user process");
-    gpiiClient.ipcConnection = null;
-    if (!gpiiClient.inShutdown) {
-        processHandling.stopChildProcess(ipcConnection.processKey, true);
+    gpiiClient.ipcConnection[ipcConnection] = null;
+    if (!ipcConnection.inShutdown) {
+        processHandling.stopChildProcess(ipcConnection.sessionID, ipcConnection.processKey, true);
     }
 };
 
@@ -205,25 +215,26 @@ gpiiClient.closed = function (ipcConnection) {
  * Monitors the status of the GPII process, by continually sending a request and waiting for a reply. If there is no
  * reply within a timeout, then the process is killed.
  *
+ * @param {IpcConnection} ipcConnection The IPC connection.
  * @param {Number} timeout Seconds to wait before determining that the process is unresponsive.
  */
-gpiiClient.monitorStatus = function (timeout) {
+gpiiClient.monitorStatus = function (ipcConnection, timeout) {
 
     var isRunning = false;
-    var processKey = gpiiClient.ipcConnection && gpiiClient.ipcConnection.processKey;
 
-    gpiiClient.sendRequest("status").then(function (response) {
+    gpiiClient.sendRequest(ipcConnection, "status").then(function (response) {
         isRunning = response && response.isRunning;
     });
 
     setTimeout(function () {
-        if (gpiiClient.inShutdown || !gpiiClient.ipcConnection) {
+        if (ipcConnection.inShutdown || !gpiiClient.ipcConnection[ipcConnection.sessionID]) {
             // No longer needs to be monitored.
         } else if (isRunning) {
-            gpiiClient.monitorStatus(timeout);
+            // Continue monitoring
+            gpiiClient.monitorStatus(ipcConnection, timeout);
         } else {
             service.logError("GPII client is not responding.");
-            processHandling.stopChildProcess(processKey, true);
+            processHandling.stopChildProcess(ipcConnection.sessionID, ipcConnection.processKey, true);
         }
     }, timeout * 1000);
 };
@@ -231,7 +242,7 @@ gpiiClient.monitorStatus = function (timeout) {
 /**
  * Handles a request from the GPII user process.
  *
- * @param {ServiceRequest} request The request data.
+ * @param {GPIIRequest} request The request data.
  * @return {Promise|Object} The response data.
  */
 gpiiClient.requestHandler = function (request) {
@@ -245,27 +256,31 @@ gpiiClient.requestHandler = function (request) {
 /**
  * Sends a request to the GPII user process.
  *
+ * @param {IpcConnection|String} ipcConnection The IPC connection, or "all" to send to all connections.
  * @param {String} requestType The request type.
  * @param {Object} requestData The request data.
  * @return {Promise} Resolves with the response when it is received.
  */
-gpiiClient.sendRequest = function (requestType, requestData) {
+gpiiClient.sendRequest = function (ipcConnection, requestType, requestData) {
     var req = {
         requestType: requestType,
         requestData: requestData
     };
-    return ipc.sendRequest(gpiiClient.ipcConnection, req);
+    return ipc.sendRequest(ipcConnection, req);
 };
 
 /**
- * Tell the GPII user process to shutdown.
+ * Tell the GPII user processes to shutdown.
  * @return {Promise} Resolves with the response when it is received.
  */
 gpiiClient.shutdown = function () {
-    if (gpiiClient.ipcConnection && !gpiiClient.inShutdown) {
-        gpiiClient.inShutdown = true;
-        return gpiiClient.sendRequest("shutdown");
-    }
+    return Object.keys(gpiiClient.ipcConnection).map(function (key) {
+        var ipcConnection = gpiiClient.ipcConnection[key];
+        if ((ipcConnection && !ipcConnection.inShutdown)) {
+            ipcConnection.inShutdown = true;
+            return gpiiClient.sendRequest(ipcConnection, "shutdown");
+        }
+    });
 };
 
 service.on("ipc.connected:gpii", gpiiClient.connected);

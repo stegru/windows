@@ -469,36 +469,36 @@ jqUnit.test("test getDesktopUser", function () {
         return true;
     };
 
-    var sessionId = winapi.kernel32.WTSGetActiveConsoleSessionId();
+    var sessionID = winapi.kernel32.WTSGetActiveConsoleSessionId();
     var realWTSGetActiveConsoleSessionId = winapi.kernel32.WTSGetActiveConsoleSessionId;
     winapi.kernel32.WTSGetActiveConsoleSessionId = function () {
-        return sessionId;
+        return sessionID;
     };
 
     var realWTSQueryUserToken = winapi.wtsapi32.WTSQueryUserToken;
     var userToken = undefined;
-    winapi.wtsapi32.WTSQueryUserToken = function (sessionId, tokenBuf) {
+    winapi.wtsapi32.WTSQueryUserToken = function (sessionID, tokenBuf) {
         if (userToken) {
             tokenBuf.writeInt32LE(userToken);
         }
-        return userToken === undefined ? realWTSQueryUserToken(sessionId, tokenBuf) : !!userToken;
+        return userToken === undefined ? realWTSQueryUserToken(sessionID, tokenBuf) : !!userToken;
     };
 
     try {
 
         // There is no session
-        sessionId = 0xffffffff;
+        sessionID = 0xffffffff;
         var token2 = windows.getDesktopUser();
         jqUnit.assertEquals("getDesktopUser unsuccessful there's no current session", 0, token2);
 
         // Successful token
-        sessionId = 1;
+        sessionID = 1;
         userToken = 1234;
         var token3 = windows.getDesktopUser();
         jqUnit.assertEquals("getDesktopUser should return correct token", userToken, token3);
 
         // Fail token
-        sessionId = 1;
+        sessionID = 1;
         userToken = 0;
         var token4 = windows.getDesktopUser();
         jqUnit.assertEquals("getDesktopUser should return 0 for no token", userToken, token4);
@@ -534,7 +534,8 @@ jqUnit.test("user environment tests", function () {
         var userDatadir = windows.getUserDataDir(token);
         var expectedDataDir = path.join(process.env.APPDATA, "GPII");
 
-        jqUnit.assertEquals("User data dir for this user should be correct", expectedDataDir, userDatadir);
+        jqUnit.assertEquals("User data dir for this user should be correct",
+            expectedDataDir.toLowerCase(), userDatadir.toLowerCase());
     } finally {
         windows.closeToken(token);
     }

@@ -20,7 +20,9 @@
 var service = require("./service.js"),
     ipc = require("./gpii-ipc.js"),
     windows = require("./windows.js"),
-    winapi = require("./winapi.js");
+    winapi = require("./winapi.js"),
+    path = require("path"),
+    fs = require("fs");
 
 var processHandling = {};
 module.exports = processHandling;
@@ -64,7 +66,9 @@ processHandling.sessionChange = function (eventType, sessionID) {
     switch (eventType) {
     case "session-logon":
         // User just logged on - start the processes.
-        processHandling.startChildProcesses(sessionID);
+        service.isReady().then(function () {
+            processHandling.startChildProcesses(sessionID);
+        });
         break;
     case "session-logoff":
         // User just logged off - stop the processes (windows should have done this already).
@@ -74,23 +78,137 @@ processHandling.sessionChange = function (eventType, sessionID) {
 };
 
 /**
+ * Gets the list of child processes to start.
+ * @param {Object<String,ProcessConfig>} allProcesses [optional] Map of processes (default:`service.config.processes`)
+ * @return {Array<ProcessConfig>} Array of processes to start.
+ */
+processHandling.getProcessList = function (allProcesses) {
+    if (!allProcesses) {
+        allProcesses = service.config.processes;
+    }
+
+    var config = processHandling.getGpiiConfig();
+    var processesKeys = Object.keys(allProcesses);
+    var processes = [];
+
+    processesKeys.forEach(function (key) {
+        if (allProcesses[key].disabled) {
+            service.logWarn("startChildProcess not starting", key, "(disabled via config)");
+        } else {
+            var proc = Object.assign({key: key}, allProcesses[key]);
+            var start = true;
+            if (config && proc.ipc === "gpii") {
+                // Get the NODE_ENV value ("the metrics switch")
+                if (config.value === "off:off") {
+                    service.logWarn("startChildProcess not starting", key, "(disabled via metrics switch)");
+                    start = false;
+                } else if (config.config) {
+                    if (!proc.env) {
+                        proc.env = {};
+                    }
+                    proc.env[config.envName] = config.config;
+                }
+            }
+
+            if (start) {
+                processes.push(proc);
+            }
+        }
+    });
+
+    return processes;
+};
+
+/**
+ * Hide or show the morphic desktop icon, depending on the value of the metrics switch.
+ * When hiding, they're moved from C:\Users\Public\Desktop to C:\ProgramData\Morphic\Icons. Showing will move them back.
+ * This needs to be performed by the service, because they're owned by administrator.
+ */
+processHandling.toggleDesktopIcons = function () {
+    var config = processHandling.getGpiiConfig();
+    var morphicHide = config && config.value && config.value.startsWith("off:");
+
+    var iconFiles = [ "Morphic QuickStrip.lnk", "Reset to Standard.lnk" ];
+
+    var desktopPath = path.join(process.env.PUBLIC || "C:\\Users\\Public", "Desktop");
+    var stashPath = path.join(process.env.PROGRAMDATA || "C:\\ProgramData", "Morphic");
+
+
+    iconFiles.forEach(function (file) {
+
+        var desktop = path.join(desktopPath, file);
+        var stashed = path.join(stashPath, file);
+
+        service.logDebug("Setting desktop icon: ", desktop, stashed, morphicHide ? "hide" : "show");
+
+        try {
+            // Ensure there's a copy in the stash location
+            if (!fs.existsSync(stashed)) {
+                fs.copyFileSync(desktop, stashed);
+            }
+
+            var iconExists = fs.existsSync(desktop);
+            if (morphicHide) {
+                // Remove the desktop icon
+                if (iconExists) {
+                    fs.unlinkSync(desktop);
+                }
+            } else if (!iconExists) {
+                // Copy it back from the stash
+                fs.copyFileSync(stashed, desktop);
+            }
+
+        } catch (e) {
+            service.logError("Error setting desktop icon", e.message, e);
+        }
+    });
+};
+
+/**
  * Starts the configured processes.
  * @param {Number} sessionID The session ID in which to start the processes.
  */
 processHandling.startChildProcesses = function (sessionID) {
-    var processes = Object.keys(service.config.processes);
+
+    processHandling.toggleDesktopIcons();
+
+    var processes = processHandling.getProcessList();
+
+    if (processes.length === 0) {
+        service.logWarn("No processes have been configured to start.");
+    }
     // Start each child process sequentially.
     var startNext = function () {
-        var key = processes.shift();
-        if (key && !service.config.processes[key].disabled) {
-            var proc = Object.assign({key: key}, service.config.processes[key]);
-            processHandling.startChildProcess(proc, sessionID).then(startNext, function (err) {
-                service.logError("startChildProcess failed for " + key, err);
-                startNext();
-            });
+        var proc = processes.shift();
+        if (proc) {
+            processHandling.startChildProcess(proc, sessionID)["catch"](function (err) {
+                service.logError("startChildProcess failed for " + proc, err);
+            }).then(startNext);
         }
     };
     startNext();
+};
+
+/**
+ * Gets the config for the GPII process (the metrics switch).
+ * @return {Object} Object containing the metricsSwitch (`value`), the config to use (`config`), and the name of the
+ * environment variable to set (`envName`)
+ */
+processHandling.getGpiiConfig = function () {
+    var togo;
+
+    if (service.config.gpiiConfig) {
+        var siteConfig = service.getSiteConfig();
+        if (siteConfig && siteConfig.metricsSwitch) {
+            togo = {
+                value: siteConfig.metricsSwitch.toLowerCase(),
+                envName: service.config.gpiiConfig.env || "NODE_ENV"
+            };
+            togo.config = service.config.gpiiConfig[togo.value];
+        }
+    }
+
+    return togo;
 };
 
 /**

@@ -21,6 +21,7 @@ var jqUnit = require("node-jqunit"),
     path = require("path"),
     child_process = require("child_process"),
     processHandling = require("../src/processHandling.js"),
+    service = require("../src/service.js"),
     windows = require("../src/windows.js"),
     winapi = require("../src/winapi.js");
 
@@ -36,6 +37,89 @@ jqUnit.module("GPII Service processHandling tests", {
         }
     }
 });
+
+processHandlingTests.testData.processList = {
+    allProcesses: {
+        proc1: {command: "p1"},
+        proc2: {command: "p2", disabled: true},
+        proc3: {command: "p3", disabled: false},
+        proc4: {command: "p4", ipc: "gpii"},
+        proc5: {command: "p5", ipc: "other"},
+        proc6: {command: "p6"}
+    },
+    tests: [
+        {
+            id: "no config",
+            gpiiConfig: null,
+            expect: [
+                {key: "proc1", command: "p1"},
+                {key: "proc3", command: "p3", disabled: false},
+                {key: "proc4", command: "p4", ipc: "gpii"},
+                {key: "proc5", command: "p5", ipc: "other"},
+                {key: "proc6", command: "p6"}
+            ]
+        },
+        {
+            id: "with config, on:on",
+            siteConfig: {
+                metricsSwitch: "on:on"
+            },
+            gpiiConfig: {
+                env: "NODE_ENV",
+                "on:on": "app.testing.metrics",
+                "off:off": "app.disable",
+                "off:on": "app.metrics",
+                "on:off": "app.testing"
+            },
+            expect: [
+                {key: "proc1", command: "p1"},
+                {key: "proc3", command: "p3", disabled: false},
+                {key: "proc4", command: "p4", ipc: "gpii", env: {"NODE_ENV": "app.testing.metrics"}},
+                {key: "proc5", command: "p5", ipc: "other"},
+                {key: "proc6", command: "p6"}
+            ]
+        },
+        {
+            id: "with config, off:off",
+            siteConfig: {
+                metricsSwitch: "off:off"
+            },
+            gpiiConfig: {
+                env: "NODE_ENV",
+                "on:on": "app.testing.metrics",
+                "off:off": "app.disable",
+                "off:on": "app.metrics",
+                "on:off": "app.testing"
+            },
+            expect: [
+                {key: "proc1", command: "p1"},
+                {key: "proc3", command: "p3", disabled: false},
+                {key: "proc5", command: "p5", ipc: "other"},
+                {key: "proc6", command: "p6"}
+            ]
+        },
+        {
+            id: "with config, invalid",
+            siteConfig: {
+                metricsSwitch: "invalid"
+            },
+            gpiiConfig: {
+                env: "NODE_ENV",
+                "on:on": "app.testing.metrics",
+                "off:off": "app.disable",
+                "off:on": "app.metrics",
+                "on:off": "app.testing"
+            },
+            expect: [
+                {key: "proc1", command: "p1"},
+                {key: "proc3", command: "p3", disabled: false},
+                {key: "proc4", command: "p4", ipc: "gpii"},
+                {key: "proc5", command: "p5", ipc: "other"},
+                {key: "proc6", command: "p6"}
+            ]
+        }
+    ]
+};
 
 processHandlingTests.testData.startChildProcess = [
     // Shouldn't restart if stopChildProcess is used.
@@ -212,6 +296,28 @@ processHandlingTests.waitForMutex = function (mutexName, timeout) {
         checkMutex();
     });
 };
+
+// Tests getProcessList
+jqUnit.test("testing getProcessList", function () {
+
+
+    var getSiteConfig = service.getSiteConfig;
+
+    try {
+        processHandlingTests.testData.processList.tests.forEach(function (test) {
+            service.getSiteConfig = function () {
+                return test.siteConfig;
+            };
+            service.config.gpiiConfig = test.gpiiConfig;
+            var result = processHandling.getProcessList(processHandlingTests.testData.processList.allProcesses);
+            jqUnit.assertDeepEq("getProcessList should return the expected processes (test.id:" + test.id + ")",
+                test.expect, result);
+        });
+    } finally {
+        service.getSiteConfig = getSiteConfig;
+    }
+
+});
 
 // Tests getProcessCreationTime
 jqUnit.test("Test getProcessCreationTime", function () {
@@ -530,8 +636,6 @@ jqUnit.asyncTest("Test unmonitorProcess", function () {
 // Test starting and stopping the service
 jqUnit.asyncTest("Service start+stop", function () {
     jqUnit.expect(1);
-
-    var service = require("../src/service.js");
 
     var mutexName = "gpii-test-" + Math.random().toString(32);
 

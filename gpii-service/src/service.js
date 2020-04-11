@@ -146,7 +146,7 @@ service.start = function () {
 
     if (windows.isUserLoggedOn()) {
         // The service was started while a user is already active; fake a session-change event to get things started.
-        service.controlHandler("sessionchange", "session-logon");
+        service.controlHandler("sessionchange", "session-logon", windows.getConsoleSessionId());
     }
 };
 
@@ -205,10 +205,11 @@ service.stopNow = function () {
  *
  * @param {String} controlName Name of the control code.
  * @param {String} [eventType] For the "sessionchange" control code, this specifies the type of event.
+ * @param {Number} [eventData] Data specific to the event. For the "sessionchange" control code, this is the session id.
  */
-service.controlHandler = function (controlName, eventType) {
-    service.logDebug("Service control: ", controlName, eventType);
-    service.emit("service." + controlName, eventType);
+service.controlHandler = function (controlName, eventType, eventData) {
+    service.logDebug("Service control: ", controlName, eventType, eventData);
+    service.emit("service." + controlName, eventType, eventData);
 };
 
 

@@ -33,14 +33,22 @@ var windows = {
  */
 windows.isService = function () {
     // Services run in session 0
-    var sessionId = ref.alloc(winapi.types.DWORD);
-    var success = winapi.kernel32.ProcessIdToSessionId(process.pid, sessionId);
+    return windows.getSessionID() === 0;
+};
+
+/**
+ * Gets the session ID of this process.
+ * @return {Number} The session ID. (usually 0, which is the session that services run in)
+ */
+windows.getSessionID = function () {
+    var sessionID = ref.alloc(winapi.types.DWORD);
+    var success = winapi.kernel32.ProcessIdToSessionId(process.pid, sessionID);
 
     if (!success) {
         throw windows.win32Error("ProcessIdToSessionId", success);
     }
 
-    return sessionId.deref() === 0;
+    return sessionID.deref();
 };
 
 /**
@@ -103,48 +111,75 @@ windows.getDesktopUser = function () {
     var userToken;
 
     if (windows.isService()) {
-        // Get the session ID of the console session.
-        var sessionId = winapi.kernel32.WTSGetActiveConsoleSessionId();
-        logging.debug("session id:", sessionId);
-
-
-        if (sessionId === 0xffffffff) {
-            // There isn't a session.
-            userToken = 0;
-        } else {
-            // Get the access token of the user logged into the session.
-            var tokenBuf = ref.alloc(winapi.types.HANDLE);
-            var success = winapi.wtsapi32.WTSQueryUserToken(sessionId, tokenBuf);
-
-            if (success) {
-                userToken = tokenBuf.deref();
-            } else {
-                var errorCode = winapi.kernel32.GetLastError();
-                logging.warn("WTSQueryUserToken failed (win32=" + errorCode + ")");
-
-                switch (errorCode) {
-                case winapi.errorCodes.ERROR_NO_TOKEN:
-                case winapi.errorCodes.ERROR_SUCCESS:
-                    // There is no user on this session.
-                    userToken = 0;
-                    break;
-                case winapi.errorCodes.ERROR_ACCESS_DENIED:
-                case winapi.errorCodes.ERROR_PRIVILEGE_NOT_HELD:
-                    // Not running as a service?
-                    throw winapi.error("WTSQueryUserToken (isService may be wrong)", errorCode);
-                    break;
-                default:
-                    throw winapi.error("WTSQueryUserToken", errorCode);
-                    break;
-                }
-            }
-        }
+        userToken = windows.getSessionUserToken();
     } else {
         // If not running as a service, then assume the current user is the desktop user.
         userToken = windows.getOwnUserToken();
     }
 
     return userToken;
+};
+
+/**
+ * Gets the user token for the given session.
+ * @param {Number} sessionID [optional] The session ID [default: the active session on the console]
+ * @return {Number} The token for the user.
+ */
+windows.getSessionUserToken = function (sessionID) {
+    if (sessionID === undefined) {
+        sessionID = windows.getConsoleSessionId();
+    }
+
+    var userToken;
+
+    if (sessionID === undefined) {
+        // There isn't a session.
+        userToken = 0;
+    } else if (windows.isService()) {
+        // Get the access token of the user logged into the session.
+        var tokenBuf = ref.alloc(winapi.types.HANDLE);
+        var success = winapi.wtsapi32.WTSQueryUserToken(sessionID, tokenBuf);
+
+        if (success) {
+            userToken = tokenBuf.deref();
+        } else {
+            var errorCode = winapi.kernel32.GetLastError();
+            logging.warn("WTSQueryUserToken failed (win32=" + errorCode + ")");
+
+            switch (errorCode) {
+            case winapi.errorCodes.ERROR_NO_TOKEN:
+            case winapi.errorCodes.ERROR_SUCCESS:
+                // There is no user on this session.
+                userToken = 0;
+                break;
+            case winapi.errorCodes.ERROR_ACCESS_DENIED:
+            case winapi.errorCodes.ERROR_PRIVILEGE_NOT_HELD:
+                // Not running as a service?
+                throw winapi.error("WTSQueryUserToken (isService may be wrong)", errorCode);
+                break;
+            default:
+                throw winapi.error("WTSQueryUserToken", errorCode);
+                break;
+            }
+        }
+    } else {
+        userToken = windows.getOwnUserToken();
+    }
+
+    return userToken;
+};
+
+/**
+ * Gets the active session id for the console.
+ * @return {Number} The session ID active on the console.
+ */
+windows.getConsoleSessionId = function () {
+    var sessionID = winapi.kernel32.WTSGetActiveConsoleSessionId();
+    if (sessionID === 0xffffffff) {
+        // There isn't a session
+        sessionID = undefined;
+    }
+    return sessionID;
 };
 
 /**
@@ -304,6 +339,12 @@ windows.waitForMultipleObjects = function (handles, timeout, waitAll) {
                 }
             });
     });
+};
+
+windows.getExitCode = function (processHandle) {
+    var exitCode = ref.alloc(winapi.types.DWORD);
+    var success = winapi.kernel32.GetExitCodeProcess(processHandle, exitCode);
+    return success && exitCode.deref();
 };
 
 /**

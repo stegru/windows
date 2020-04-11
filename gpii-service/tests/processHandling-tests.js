@@ -160,6 +160,8 @@ processHandlingTests.testData.monitorProcessFailures = [
     { input: -1 }
 ];
 
+processHandlingTests.testData.sessionID = windows.getSessionID();
+
 /**
  * Start a process that self terminates after 10 seconds.
  * @return {ChildProcess} The child process.
@@ -323,6 +325,8 @@ jqUnit.asyncTest("Test startChildProcess", function () {
         processHandling.throttleRate = throttleRate_orig;
     });
 
+    var sessionID = windows.getSessionID();
+
     // For each test a child process is started (using the input data). It's then stopped via either stopChildProcess or
     // kill. A check is made if the process has ended, and if the process has been restarted or not.
     // The pid of the new child process is unknown, so a mutex is created by the child then checked here if it exists or
@@ -339,7 +343,7 @@ jqUnit.asyncTest("Test startChildProcess", function () {
         var mutexName = procConfig.key + Math.random().toString(32);
         procConfig.command = "node.exe " + path.join(__dirname, "gpii-ipc-tests-child.js") + " mutex " + mutexName;
 
-        var promise = processHandling.startChildProcess(procConfig);
+        var promise = processHandling.startChildProcess(procConfig, sessionID);
 
         jqUnit.assertTrue("startProcess must return a promise" + messageSuffix,
             promise && typeof(promise.then) === "function");
@@ -362,7 +366,7 @@ jqUnit.asyncTest("Test startChildProcess", function () {
                             jqUnit.assertEquals("process should not restart" + messageSuffix, "timeout", value);
                         }
 
-                        processHandling.stopChildProcess(procConfig.key, false);
+                        processHandling.stopChildProcess(sessionID, procConfig.key, false);
 
                         nextTest(testIndex + 1);
                     }, jqUnit.fail);
@@ -371,7 +375,7 @@ jqUnit.asyncTest("Test startChildProcess", function () {
 
             // Kill the first process.
             if (test.input.stopChildProcess) {
-                processHandling.stopChildProcess(procConfig.key, false);
+                processHandling.stopChildProcess(sessionID, procConfig.key, false);
             } else {
                 process.kill(pid);
             }
@@ -394,7 +398,7 @@ jqUnit.asyncTest("Test monitorProcess - single process", function () {
     var killed = false;
     promise.then(function (value) {
         jqUnit.assertTrue("monitorProcess should not resolve before the process is killed", killed);
-        jqUnit.assertEquals("monitorProcess should resolve with the process id", child.pid, value);
+        jqUnit.assertEquals("monitorProcess should resolve with the exit code", 1, value);
         jqUnit.start();
     }, jqUnit.fail);
 
@@ -427,9 +431,10 @@ jqUnit.asyncTest("Test monitorProcess - multiple processes", function () {
     };
 
     procs.forEach(function (proc) {
-        processHandling.monitorProcess(proc.pid).then(function (pid) {
-            jqUnit.assertEquals("monitorProcess must resolve with the same pid", proc.pid, pid);
-            jqUnit.assertNotEquals("monitorProcess must resolve after the process is killed", -1, killed.indexOf(pid));
+        processHandling.monitorProcess(proc.pid).then(function (exitCode) {
+            jqUnit.assertEquals("monitorProcess must resolve with the exit code", 1, exitCode);
+            jqUnit.assertNotEquals("monitorProcess must resolve after the process is killed", -1,
+                killed.indexOf(proc.pid));
             killProcess();
         }, jqUnit.fail);
     });
@@ -511,7 +516,7 @@ jqUnit.asyncTest("Test unmonitorProcess", function () {
 
     promise2.then(function (value) {
         jqUnit.assertTrue("promise2 should not resolve before the process is killed", killed);
-        jqUnit.assertEquals("promise2 should resolve with the process id", child2.pid, value);
+        jqUnit.assertEquals("promise2 should resolve with the exit code", 1, value);
         jqUnit.start();
     }, jqUnit.fail);
 
@@ -565,7 +570,7 @@ jqUnit.asyncTest("Service start+stop", function () {
         if (value === "timeout") {
             jqUnit.fail("Timed out waiting for child process");
         } else {
-            var pid = processHandling.childProcesses.testProcess.pid;
+            var pid = processHandling.childProcesses[windows.getSessionID()].testProcess.pid;
 
             // stop the service, see if the child terminates.
             service.stop();

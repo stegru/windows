@@ -49,40 +49,42 @@ module.exports = processHandling;
  */
 
 /**
- * @type {Array<ChildProcess>}
+ * @type {Array<Array<ChildProcess>>}
  */
 processHandling.childProcesses = {};
 
 /**
  * The active console session has changed.
  * @param {String} eventType The event type for the sessionChange event (see service.controlHandler()).
+ * @param {Number} sessionID Session identifier that triggered the session change event.
  */
-processHandling.sessionChange = function (eventType) {
+processHandling.sessionChange = function (eventType, sessionID) {
     service.logDebug("session change", eventType);
 
     switch (eventType) {
     case "session-logon":
         // User just logged on - start the processes.
-        processHandling.startChildProcesses();
+        processHandling.startChildProcesses(sessionID);
         break;
     case "session-logoff":
         // User just logged off - stop the processes (windows should have done this already).
-        processHandling.stopChildProcesses();
+        processHandling.stopChildProcesses(sessionID);
         break;
     }
 };
 
 /**
  * Starts the configured processes.
+ * @param {Number} sessionID The session ID in which to start the processes.
  */
-processHandling.startChildProcesses = function () {
+processHandling.startChildProcesses = function (sessionID) {
     var processes = Object.keys(service.config.processes);
     // Start each child process sequentially.
     var startNext = function () {
         var key = processes.shift();
         if (key && !service.config.processes[key].disabled) {
             var proc = Object.assign({key: key}, service.config.processes[key]);
-            processHandling.startChildProcess(proc).then(startNext, function (err) {
+            processHandling.startChildProcess(proc, sessionID).then(startNext, function (err) {
                 service.logError("startChildProcess failed for " + key, err);
                 startNext();
             });
@@ -95,10 +97,17 @@ processHandling.startChildProcesses = function () {
  * Starts a process.
  *
  * @param {ProcessConfig} procConfig The process configuration (from service-config.json).
+ * @param {Number} sessionID The session ID in which to start the process.
  * @return {Promise} Resolves (with the pid) when the process has started.
  */
-processHandling.startChildProcess = function (procConfig) {
-    var childProcess = processHandling.childProcesses[procConfig.key];
+processHandling.startChildProcess = function (procConfig, sessionID) {
+    var childProcess;
+
+    if (processHandling.childProcesses[sessionID]) {
+        childProcess = processHandling.childProcesses[sessionID][procConfig.key];
+    } else {
+        processHandling.childProcesses[sessionID] = {};
+    }
 
     service.log("Starting " + procConfig.key + ": " + (procConfig.command || "pipe only"));
     service.logDebug("Process config: ", JSON.stringify(procConfig));
@@ -110,9 +119,10 @@ processHandling.startChildProcess = function (procConfig) {
         }
     } else {
         childProcess = {
+            sessionID: sessionID,
             procConfig: procConfig
         };
-        processHandling.childProcesses[procConfig.key] = childProcess;
+        processHandling.childProcesses[sessionID][procConfig.key] = childProcess;
     }
 
     childProcess.pid = 0;
@@ -125,7 +135,8 @@ processHandling.startChildProcess = function (procConfig) {
         currentDir: procConfig.currentDir,
         authenticate: !procConfig.noAuth,
         admin: procConfig.admin,
-        processKey: procConfig.key
+        processKey: procConfig.key,
+        sessionID: childProcess.sessionID
     };
 
     var processPromise = null;
@@ -141,7 +152,7 @@ processHandling.startChildProcess = function (procConfig) {
             }
             return p.pid;
         });
-    } else if (procConfig.command) {
+    } else {
         // Start the process without a pipe.
         childProcess.pid = ipc.execute(procConfig.command, startOptions);
         childProcess.creationTime = processHandling.getProcessCreationTime(childProcess.pid);
@@ -150,7 +161,7 @@ processHandling.startChildProcess = function (procConfig) {
 
     return processPromise.then(function (pid) {
         if (procConfig.command && procConfig.autoRestart) {
-            processHandling.autoRestartProcess(procConfig.key);
+            processHandling.autoRestartProcess(childProcess.sessionID, procConfig.key);
         }
         return pid;
     });
@@ -158,28 +169,39 @@ processHandling.startChildProcess = function (procConfig) {
 
 /**
  * Stops all child processes. This is performed when the service has been told to stop.
+ * @param {Number} sessionID [optional] The session ID containing the processes to be closed. [default: all]
  */
-processHandling.stopChildProcesses = function () {
-    service.log("Stopping processes");
-    var processKeys = Object.keys(processHandling.childProcesses);
-    processKeys.forEach(function (processKey) {
-        processHandling.stopChildProcess(processKey);
-    });
+processHandling.stopChildProcesses = function (sessionID) {
+    if (sessionID === undefined) {
+        service.log("Stopping processes (all sessions)");
+        Object.keys(processHandling.childProcesses).forEach(function (id) {
+            processHandling.stopChildProcesses(id);
+        });
+    } else if (processHandling.childProcesses[sessionID]) {
+        service.log("Stopping processes. session id:", sessionID);
+        var processKeys = Object.keys(processHandling.childProcesses[sessionID]);
+        processKeys.forEach(function (processKey) {
+            processHandling.stopChildProcess(sessionID, processKey);
+        });
+    }
 };
 
 /**
  * Stops a child process.
+ * @param {Number} sessionID The session ID containing the process to be closed.
  * @param {String} processKey Identifies the child process.
  * @param {Boolean} [restart] Allow the process to be restarted, if configured.
  */
-processHandling.stopChildProcess = function (processKey, restart) {
-    var childProcess = processHandling.childProcesses[processKey];
+processHandling.stopChildProcess = function (sessionID, processKey, restart) {
+    var childProcess = processHandling.childProcesses[sessionID]
+        && processHandling.childProcesses[sessionID][processKey];
+
     if (childProcess) {
-        service.log("Stopping " + processKey + ": " + childProcess.procConfig.command);
+        service.log("Stopping " + processKey + " (session " + sessionID + "): " + childProcess.procConfig.command);
 
         childProcess.shutdown = !restart;
 
-        if (processHandling.isProcessRunning(childProcess.pid,  childProcess.creationTime)) {
+        if (processHandling.isProcessRunning(childProcess.pid, childProcess.creationTime)) {
             try {
                 process.kill(childProcess.pid);
             } catch (e) {
@@ -193,10 +215,12 @@ processHandling.stopChildProcess = function (processKey, restart) {
 
 /**
  * Set a running process to not restart. Called when the impending termination is intentional.
+ * @param {Number} sessionID The session ID containing the process.
  * @param {String} processKey Identifies the child process.
  */
-processHandling.dontRestartProcess = function (processKey) {
-    var childProcess = processHandling.childProcesses[processKey];
+processHandling.dontRestartProcess = function (sessionID, processKey) {
+    var childProcess = processHandling.childProcesses[sessionID]
+        && processHandling.childProcesses[sessionID][processKey];
     if (childProcess) {
         childProcess.shutdown = true;
     }
@@ -205,12 +229,13 @@ processHandling.dontRestartProcess = function (processKey) {
 /**
  * Auto-restarts a child process when it terminates.
  *
+ * @param {Number} sessionID The session which the process is in.
  * @param {String} processKey Identifies the child process.
  */
-processHandling.autoRestartProcess = function (processKey) {
-    var childProcess = processHandling.childProcesses[processKey];
-    processHandling.monitorProcess(childProcess.pid).then(function () {
-        service.log("Child process '" + processKey + "' died");
+processHandling.autoRestartProcess = function (sessionID, processKey) {
+    var childProcess = processHandling.childProcesses[sessionID][processKey];
+    processHandling.monitorProcess(childProcess.pid).then(function (exitCode) {
+        service.log("Child process '" + processKey + "' died: ", exitCode);
         service.emit("process.stop", processKey);
 
         if (childProcess.shutdown) {
@@ -236,7 +261,7 @@ processHandling.autoRestartProcess = function (processKey) {
                 // Delay restart it.
                 var delay = processHandling.throttleRate(childProcess.failureCount);
                 service.logDebug("Restarting process '" + processKey + "' in " + Math.round(delay / 1000) + " seconds.");
-                setTimeout(processHandling.startChildProcess, delay, childProcess.procConfig);
+                setTimeout(processHandling.startChildProcess, delay, childProcess.procConfig, sessionID);
             }
         }
     });
@@ -361,7 +386,8 @@ processHandling.monitorProcess = function (pid) {
 
     return new Promise(function (resolve, reject) {
         // Get the process handle.
-        var processHandle = winapi.kernel32.OpenProcess(winapi.constants.SYNCHRONIZE, 0, pid);
+        var processHandle = winapi.kernel32.OpenProcess(
+            winapi.constants.SYNCHRONIZE | winapi.constants.PROCESS_QUERY_LIMITED_INFORMATION, 0, pid);
         if (processHandle === winapi.NULL) {
             reject(windows.win32Error("OpenProcess"));
         }
@@ -448,9 +474,13 @@ processHandling.startWait = function () {
             if (proc.isEvent) {
                 // The event was triggered to re-start waiting.
             } else {
+                // Get the exit code
+                var exitCode = windows.getExitCode(handle);
+                service.logDebug("Process", proc.pid, "terminated with", exitCode);
+
                 // Remove it from the list, and resolve.
                 processHandling.unmonitorProcess(proc, true);
-                proc.resolve(proc.pid);
+                proc.resolve(exitCode);
             }
             // Start waiting again.
             processHandling.startWait();
@@ -485,4 +515,6 @@ processHandling.startWait = function () {
 // Listen for session change.
 service.on("service.sessionchange", processHandling.sessionChange);
 // Listen for service stop.
-service.on("stop", processHandling.stopChildProcesses);
+service.on("stop", function () {
+    processHandling.stopChildProcesses();
+});
